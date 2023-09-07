@@ -1,74 +1,57 @@
-import asyncio
-import argparse
+import platform
+from datetime import datetime, timedelta
+import logging
+
 import aiohttp
-import json
-from aiofiles import open as aio_open
-from aiopath import AsyncPath
+import asyncio
+from enum import Enum
 
-class CurrencyExchange:
-    def __init__(self):
-        self.api_url = 'https://api.privatbank.ua/p24api/exchange_rates?json&date='
-        self.supported_currencies = ['USD', 'EUR']
-        self.days_limit = 10
+class CurrenciesEnum(Enum):
+    EUR = 'EUR'
+    USD = 'USD'
 
-    async def fetch_exchange_rate(self, date):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(self.api_url + date) as response:
-                if response.status != 200:
-                    raise Exception(f"Failed to fetch data for date: {date}")
+async def request(url: str):
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    r = await resp.json()
+                    return r
+                logging.error(f"Error status: {resp.status} for {url}")
+                return None
+        except aiohttp.ClientConnectorError as err:
+            logging.error(f"Connection error: {str(err)}")
+            return None
 
-                data = await response.json()
+async def get_exchange(currency_code: CurrenciesEnum, days):
+    today = datetime.now()
+    exchange_rates = []
 
-                exchange_rates = {}
-                for currency in self.supported_currencies:
-                    rate = {
-                        'sale': data['exchangeRate'][currency]['saleRate'],
-                        'purchase': data['exchangeRate'][currency]['purchaseRate']
-                    }
-                    exchange_rates[currency] = rate
+    for day in range(days):
+        data_need = (today - timedelta(days=day)).strftime('%d.%m.%Y')
+        result = await request(f'https://api.privatbank.ua/p24api/exchange_rates?json&date={data_need}')
+        
+        if result:
+            rates = result.get("exchangeRate")
+            exc = [rate for rate in rates if rate["currency"] == currency_code.value]
 
-                return exchange_rates
+            if exc:
+                exchange_rates.append({data_need: {currency_code.name: {
+                    'sale': exc[0]['saleRate'],
+                    'purchase': exc[0]['purchaseRate']
+                }}})
 
-    async def get_exchange_rates(self, days):
-        today = await self.fetch_exchange_rate('')
-        exchange_rates = []
-
-        for day in range(days):
-            date = today['date']
-            rates = await self.fetch_exchange_rate(date)
-            exchange_rates.append({date: rates})
-            today = await self.fetch_exchange_rate(today['previousDate'])
-
-        return exchange_rates
-
-    async def save_exchange_rates_to_file(self, exchange_rates, filename):
-        async with aio_open(filename, 'w') as file:
-            await file.write(json.dumps(exchange_rates, indent=2))
-
-    async def load_exchange_rates_from_file(self, filename):
-        async with aio_open(filename, 'r') as file:
-            return json.loads(await file.read())
-
-    async def exchange(self, days, output_file=None):
-        if days > self.days_limit:
-            raise ValueError(f"Maximum allowed days is {self.days_limit}")
-
-        exchange_rates = await self.get_exchange_rates(days)
-
-        if output_file:
-            await self.save_exchange_rates_to_file(exchange_rates, output_file)
-        return exchange_rates
-
-async def main():
-    parser = argparse.ArgumentParser(description='Currency Exchange Utility')
-    parser.add_argument('days', type=int, help='Number of days to retrieve exchange rates for')
-    parser.add_argument('--output', '-o', help='Output file to save exchange rates')
-    args = parser.parse_args()
-
-    currency_exchange = CurrencyExchange()
-    exchange_rates = await currency_exchange.exchange(args.days, args.output)
-
-    print(json.dumps(exchange_rates, indent=2))
+    return exchange_rates
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    if platform.system() == 'Windows':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    days = int(input('Enter the number of days: '))
+
+    if days <= 0:
+        print("Invalid number of days.")
+    else:
+        currency_code = CurrenciesEnum(input('Currency code (EUR/USD): '))
+        result = asyncio.run(get_exchange(currency_code, days))
+        print(json.dumps(result, indent=2))
